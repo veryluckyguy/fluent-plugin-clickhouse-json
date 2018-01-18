@@ -2,11 +2,11 @@ require 'fluent/output'
 require 'fluent/config/error'
 require 'net/http'
 require 'date'
-require 'csv'
+require 'yajl'
 
 module Fluent
-    class ClickhouseOutput < BufferedOutput
-        Fluent::Plugin.register_output("clickhouse", self)
+    class ClickhouseOutputJSON < BufferedOutput
+        Fluent::Plugin.register_output("clickhousejson", self)
 
         DEFAULT_TIMEKEY = 60 * 60 * 24
 
@@ -18,13 +18,12 @@ module Fluent
         config_param :database, :string, default: "default"
         desc "Table to use"
         config_param :table, :string
+        desc "User of Clickhouse database"
+        config_param :user, :string, default: "default"
+        desc "Password of Clickhouse database"
+        config_param :password, :string, default: ""
         desc "Offset in minutes, could be useful to substract timestamps because of timezones"
         config_param :tz_offset, :integer, default: 0
-        # TODO auth and SSL params. and maybe gzip
-        desc "Order of fields while insert"
-        config_param :fields, :array, value_type: :string
-        desc "Which part of tag should be taken"
-        config_param :tag_part, :integer, default: nil
         desc "Name of internal fluentd time field (if need to use)"
         config_param :datetime_name, :string, default: nil
         config_section :buffer do
@@ -36,13 +35,11 @@ module Fluent
 
         def configure(conf)
             super
-            @uri, @uri_params   = make_uri(conf)
-            @database           = conf["database"] || "default"
-            @table              = conf["table"]
-            @fields             = fields.select{|f| !f.empty? }
-            @tz_offset          = conf["tz_offset"].to_i
-            @tag_part           = conf["tag_part"]
-            @datetime_name      = conf["datetime_name"]
+            @uri, @uri_params = make_uri(conf)
+            @table            = conf["table"]
+            @tz_offset        = conf["tz_offset"].to_i
+            @datetime_name    = conf["datetime_name"]
+
             test_connection(conf)
         end
 
@@ -50,9 +47,9 @@ module Fluent
             uri = @uri.clone
             uri.query = URI.encode_www_form(@uri_params.merge({"query" => "SHOW TABLES"}))
             begin
-            	res = Net::HTTP.get_response(uri)
+        	res = Net::HTTP.get_response(uri)
             rescue Errno::ECONNREFUSED
-            	raise Fluent::ConfigError, "Couldn't connect to ClickHouse at #{ @uri } - connection refused" 
+        	raise Fluent::ConfigError, "Couldn't connect to ClickHouse at #{ @uri } - connection refused"
             end
             if res.code != "200"
                 raise Fluent::ConfigError, "ClickHouse server responded non-200 code: #{ res.body }"
@@ -61,7 +58,12 @@ module Fluent
 
         def make_uri(conf)
             uri = URI("http://#{ conf["host"] }:#{ conf["port"] || 8123 }/")
-            params = {"database" => conf["database"] || "default"}
+            params = {
+                "database" => conf["database"] || "default",
+                "user"     => conf["user"] || "default",
+                "password" => conf["password"] || "",
+                "input_format_skip_unknown_fields" => 1
+            }
             return uri, params
         end
 
@@ -69,31 +71,20 @@ module Fluent
             if @datetime_name
                 record[@datetime_name] = timestamp + @tz_offset * 60
             end
-            row = []
-            @fields.each { |key|
-                if key == "tag" 
-                    if @tag_part then val = tag
-                    else
-                        val = tag.split(".")[@tag_part.to_i]
-                    end
-                else
-            	    val = record[key]
-                end
-                row << val
-            }
-            return CSV.generate_line(row)
-    	end
+
+            return Yajl.dump(record) + "\n"
+	    end
 
         def write(chunk)
             uri = @uri.clone
-            query = {"query" => "INSERT INTO #{@table} (#{@fields.join(",")}) FORMAT CSV"}
+            query = {"query" => "INSERT INTO #{@table} FORMAT JSONEachRow"}
             uri.query = URI.encode_www_form(@uri_params.merge(query))
             req = Net::HTTP::Post.new(uri)
             req.body = chunk.read
             http = Net::HTTP.new(uri.hostname, uri.port)
             resp = http.request(req)
             if resp.code != "200"
-            	log.warn "Clickhouse responded: #{resp.body}"
+        	    log.warn "Clickhouse responded: #{resp.body}"
             end
         end
     end
