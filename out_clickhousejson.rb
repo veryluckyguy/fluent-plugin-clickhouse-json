@@ -28,6 +28,7 @@ module Fluent
         config_param :datetime_name, :string, default: nil
         config_section :buffer do
             config_set_default :@type, "file"
+            config_set_default :path, "buffer"
             config_set_default :chunk_keys, ["time"]
             config_set_default :flush_at_shutdown, true
             config_set_default :timekey, DEFAULT_TIMEKEY
